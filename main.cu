@@ -9,6 +9,7 @@
 #include "kernels.hpp"
 
 #define VERBOSE
+constexpr bool ALWAYS_COPY_RESULT_TO_HOST = true;
 
 inline void checkCudaErrors(const cudaError_t err) {
     if (err != cudaSuccess) {
@@ -409,7 +410,8 @@ std::chrono::duration<double> perform_timed_update(
     float* d_mean,
     float *h_cov_matrix,
     const int n,
-    const int cols)
+    const int cols,
+    const bool copy_d_to_h)
 {
     const auto start = std::chrono::high_resolution_clock::now();
 
@@ -423,7 +425,9 @@ std::chrono::duration<double> perform_timed_update(
         calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, n, cols/2);
     }
     // copy back to host so this is somewhat realistic
-    checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
+    if(copy_d_to_h) {
+        checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
+    }
 
     const auto end = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
@@ -459,7 +463,7 @@ void compare_speeds(const int order, const int num_updates) {
     std::chrono::duration<double> total_time_rank1{0};
     const auto h_cov_matrix = new float[cols * cols];
     for (int i = 0; i < num_updates; ++i) {
-        total_time_rank1 += perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols);
+        total_time_rank1 += perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols, ALWAYS_COPY_RESULT_TO_HOST);
     }
 
     // and for comparison, also run and time the 1shot method
@@ -468,7 +472,7 @@ void compare_speeds(const int order, const int num_updates) {
     checkCudaErrors(cudaMemcpy(d_data, h_data, rows * cols * sizeof(float), cudaMemcpyHostToDevice));
     std::chrono::duration<double> total_time_1shot{0};
     for (int i = 0; i < num_updates; ++i) {
-        total_time_1shot += perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols);
+        total_time_1shot += perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols, ALWAYS_COPY_RESULT_TO_HOST);
     }
 
     // summarize results
@@ -503,7 +507,7 @@ bool convert_to_bool(const char* env_var_value) {
 
 void run_for_profile(const int order) {
 
-    constexpr int num_updates = 1;
+    constexpr int num_updates = 4;
     const int rows = order + num_updates;
     const int cols = order;
 
@@ -521,22 +525,28 @@ void run_for_profile(const int order) {
     checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
 
     // // initial 1shot
-    // calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, order, cols);
-    // // rank1, once
     const auto h_cov_matrix = new float[cols * cols];
-    nvtxRangePush("perform_timed_update 0");
-    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 0, cols);
+    nvtxRangePush("1shot update 0");
+    perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, 0, cols, ALWAYS_COPY_RESULT_TO_HOST);
     nvtxRangePop();
 
-    nvtxRangePush("perform_timed_update 1");
-    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 1, cols);
+    //rank1, 3x
+    nvtxRangePush("rank1 update 0");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + 1, cols, ALWAYS_COPY_RESULT_TO_HOST);
     nvtxRangePop();
 
-    nvtxRangePush("perform_timed_update 2");
-    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 2, cols);
+    nvtxRangePush("rank1 update 1");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + 2, cols, ALWAYS_COPY_RESULT_TO_HOST);
     nvtxRangePop();
-    // // and again the 1shot
-    // perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + num_updates + 1, cols);
+
+    nvtxRangePush("rank1 update 2");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + 3, cols, ALWAYS_COPY_RESULT_TO_HOST);
+    nvtxRangePop();
+
+    // and again the 1shot
+    nvtxRangePush("1shot update 1");
+    perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + 4, cols, ALWAYS_COPY_RESULT_TO_HOST);
+    nvtxRangePop();
 
     delete[] h_data;
     delete[] h_cov_matrix;
