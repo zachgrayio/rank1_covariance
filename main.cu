@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <chrono>
+#include <nvToolsExt.h>
 
 #include "kernels.hpp"
 
@@ -485,12 +486,67 @@ void compare_speeds(const int order, const int num_updates) {
     cudaFree(d_mean);
 }
 
-int main(const int argc, char** argv) {
-    // simple small test using static data, if VERBOSE is defined it will print detailed
-    // covariance matrices
-    test_incremental_covariance();
+bool convert_to_bool(const char* env_var_value) {
+    if (env_var_value == nullptr) {
+        return false;
+    }
+    const std::string value_str(env_var_value);
+    if (value_str == "1" || value_str == "true" || value_str == "TRUE" || value_str == "on" || value_str == "ON") {
+        return true;
+    }
+    if (value_str == "0" || value_str == "false" || value_str == "FALSE" || value_str == "off" || value_str == "OFF") {
+        return false;
+    }
+    std::cerr << "Unrecognized value for boolean environment variable: " << value_str << std::endl;
+    return false;
+}
 
-    // the larger tests are parameterized and generate random data for testing
+void run_for_profile(const int order) {
+
+    constexpr int num_updates = 1;
+    const int rows = order + num_updates;
+    const int cols = order;
+
+    const auto h_data = new float[rows * cols];
+    for (int i = 0; i < rows * cols; ++i) {
+        h_data[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+
+    float* d_data;
+    checkCudaErrors(cudaMalloc(&d_data, rows * cols * sizeof(float)));
+    checkCudaErrors(cudaMemcpy(d_data, h_data, rows * cols * sizeof(float), cudaMemcpyHostToDevice));
+    float* d_cov_matrix;
+    float* d_mean;
+    checkCudaErrors(cudaMalloc(&d_cov_matrix, cols * cols * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
+
+    // // initial 1shot
+    // calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, order, cols);
+    // // rank1, once
+    const auto h_cov_matrix = new float[cols * cols];
+    nvtxRangePush("perform_timed_update 0");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 0, cols);
+    nvtxRangePop();
+
+    nvtxRangePush("perform_timed_update 1");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 1, cols);
+    nvtxRangePop();
+
+    nvtxRangePush("perform_timed_update 2");
+    perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, 2, cols);
+    nvtxRangePop();
+    // // and again the 1shot
+    // perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + num_updates + 1, cols);
+
+    delete[] h_data;
+    delete[] h_cov_matrix;
+    cudaFree(d_data);
+    cudaFree(d_cov_matrix);
+    cudaFree(d_mean);
+}
+
+int main(const int argc, char** argv) {
+    // some tests are parameterized and generate random data for testing
     int order = 5000;
     int num_updates = 2520;
     if (argc > 1) {
@@ -499,7 +555,17 @@ int main(const int argc, char** argv) {
     if (argc > 2) {
         num_updates = std::atoi(argv[2]);
     }
-    
+
+    if(convert_to_bool(std::getenv("PROFILE"))) {
+        std::cout << "PROFILING" << std::endl;
+        run_for_profile(order);
+        exit(0);
+    }
+
+    // simple small test using static data, if VERBOSE is defined it will print detailed
+    // covariance matrices
+    test_incremental_covariance();
+
     test_large_incremental_covariance(order, num_updates);
 
     compare_speeds(order, num_updates);

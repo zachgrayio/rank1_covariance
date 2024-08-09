@@ -11,4 +11,4 @@ add_executable(rank1_covariance kernels.hpp kernels.cu main.cu )
 set_target_properties(rank1_covariance PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
 
-target_link_libraries(rank1_covariance PRIVATE ${CUDA_LIBRARIES} cublas)
+target_link_libraries(rank1_covariance PRIVATE ${CUDA_LIBRARIES} cublas nvToolsExt)
