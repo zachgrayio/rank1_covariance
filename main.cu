@@ -95,6 +95,24 @@ __global__ void rank1_update_kernel(float* d_cov_matrix, const float* d_new_row,
     d_mean[idx] = new_mean;
 }
 
+__global__ void rank1_update_kernel_threaded(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    while (idx < cols) {
+        // calc new mean for the column
+        const float new_mean = d_mean[idx] + (d_new_row[idx] - d_mean[idx]) / n;
+        // calc the covariance matrix
+        for (int j = 0; j < cols; ++j) {
+            const float delta_old = d_new_row[j] - d_mean[j];
+            const float delta_new = d_new_row[j] - new_mean;
+            d_cov_matrix[idx * cols + j] = (n - 2) / static_cast<float>(n - 1) * d_cov_matrix[idx * cols + j] + delta_old * delta_new / static_cast<float>(n - 1);
+        }
+        // set mean on the device
+        d_mean[idx] = new_mean;
+        // continue to the next element this thread should handle
+        idx += gridDim.x * blockDim.x;
+    }
+}
+
 void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
     int threads = cols;
     int blocks = 1;
@@ -250,6 +268,12 @@ void test_large_incremental_covariance(const int order, const int num_updates) {
     std::cout << "large random test completed in " << duration.count() << " seconds.\n";
 }
 
+void calculate_covariances_rank1_async(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n, cudaStream_t stream) {
+    int threads = cols;
+    int blocks = 1;
+    rank1_update_kernel<<<blocks, threads, 0, stream>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
+}
+
 std::chrono::duration<double> perform_timed_update(
     const bool rank1,
     const float * d_data,
@@ -257,13 +281,14 @@ std::chrono::duration<double> perform_timed_update(
     float* d_mean,
     float *h_cov_matrix,
     const int n,
-    const int cols)
+    const int cols,
+    cudaStream_t stream)
 {
     const auto start = std::chrono::high_resolution_clock::now();
 
     // calculate the new covariance matrix for the square matrix of data with both approaches
     if(rank1) {
-        calculate_covariances_rank1(d_cov_matrix, d_data + (n-1) * cols, d_mean, cols, n);
+        calculate_covariances_rank1_async(d_cov_matrix, d_data + (n-1) * cols, d_mean, cols, n, stream);
     } else {
         // important note: for some domains, the 1shot method, since it can be called for a subset of data, is likely
         // to make use of a subset of columns--a luxury the incremental approach doesn't have, so here we use cols/2
@@ -301,16 +326,28 @@ void compare_speeds(const int order, const int num_updates) {
     checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
     calculate_covariances_1shot(d_data, d_cov_matrix, d_mean, order, cols);
 
-    // perform the incremental updates and accumulate times;
+    // perform the incremental updates and accumulate times:
+    cudaStream_t streams[num_updates];
     std::chrono::duration<double> total_time_rank1{0};
     const auto h_cov_matrix = new float[cols * cols];
     for (int i = 0; i < num_updates; ++i) {
-        total_time_rank1 += perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols);
+        cudaStreamCreate(&streams[i]);
+        total_time_rank1 += perform_timed_update(true, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols, streams[i]);
+    }
+    for (int i = 0; i < num_updates; ++i) {
+        cudaStreamSynchronize(streams[i]);
+        cudaStreamDestroy(streams[i]);
     }
 
+    cudaStream_t streams2[num_updates];
     std::chrono::duration<double> total_time_1shot{0};
     for (int i = 0; i < num_updates; ++i) {
-        total_time_1shot += perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols);
+        cudaStreamCreate(&streams2[i]);
+        total_time_1shot += perform_timed_update(false, d_data, d_cov_matrix, d_mean, h_cov_matrix, order + i + 1, cols, streams2[i]);
+    }
+    for (int i = 0; i < num_updates; ++i) {
+        cudaStreamSynchronize(streams2[i]);
+        cudaStreamDestroy(streams2[i]);
     }
 
     // summarize results
