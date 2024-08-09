@@ -240,6 +240,20 @@ void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, fl
     checkCudaErrors(cudaDeviceSynchronize(), "shared_rank1_update_kernel");
 }
 
+// a variant that spawns concurrent kernels to process chunks of big rows in parallel, might be useful on bigger GPUs
+void calculate_covariances_rank1_concurrent_chunks(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
+    int threads = cols;
+    constexpr int blocks = 24;
+    constexpr int chunks = 32;
+    const int chunk_size = (cols + chunks - 1) / chunks;
+
+    for (int chunk_start = 0; chunk_start < cols; chunk_start += chunk_size) {
+        kernels::update_covariance_chunk<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n, chunk_start, chunk_size);
+    }
+
+    checkCudaErrors(cudaDeviceSynchronize(), "update_covariance_chunk");
+}
+
 void test_incremental_covariance() {
     constexpr int rows = 7;
     int cols = 4;
