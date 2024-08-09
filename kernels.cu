@@ -53,54 +53,17 @@ __global__ void update_means_inplace(const float* d_data, float* d_mean, const i
 
     float sum = 0.0f;
     for (int i = 0; i < rows; ++i) {
-        sum = fmaf(d_data[i * cols + col], 1.0f, sum);  // Fused multiply-add
+        sum = fmaf(d_data[i * cols + col], 1.0f, sum);
     }
     d_mean[col] = sum / rows;
 }
 
 // a helper kernel to remove the pre-calculated means in-place as part of centering ahead of sgemm call in the 1
 // shot covariance method
-__global__ void subtract_means_inplace(float* d_data, const float* d_mean, const int rows, const int cols) {
+__global__ void subtract_means(const float* d_data, const float* d_mean, float* d_centered, const int rows, const int cols) {
     if (const int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < rows * cols) {
         const int col = idx % cols;
-        d_data[idx] = d_data[idx] - d_mean[col];
-    }
-}
-
-// a helper kernel that calculates and removes means from data in place (centering), but unused as its slower than
-// the separate kernels so far
-__global__ void update_and_subtract_means_inplace(float* d_data, float* d_mean, const int rows, const int cols) {
-    const int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (col < cols) {
-        float sum = 0.0f;
-        for (int i = 0; i < rows; ++i) {
-            sum = fmaf(d_data[i * cols + col], 1.0f, sum);
-        }
-        d_mean[col] = sum / rows;
-        for (int i = 0; i < rows; ++i) {
-            d_data[i * cols + col] -= d_mean[col];
-        }
-    }
-}
-
-// an "optimized" version of the combined centering, unused as real gains are yet to be realised
-__global__ void shared_update_and_subtract_means_inplace(float* d_data, const int rows, const int cols) {
-    extern __shared__ float s_mean[];
-    const int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (col < cols) {
-        float sum = 0.0f;
-        for (int i = 0; i < rows; ++i) {
-            sum = fmaf(d_data[i * cols + col], 1.0f, sum);
-        }
-
-        s_mean[threadIdx.x] = sum / rows;
-
-        __syncthreads();
-
-        for (int i = 0; i < rows; ++i) {
-            d_data[i * cols + col] = d_data[i * cols + col] - s_mean[threadIdx.x];
-        }
+        d_centered[idx] = d_data[idx] - d_mean[col];
     }
 }
 

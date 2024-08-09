@@ -7,7 +7,7 @@ def calculate_mean(data):
 def subtract_mean(data, mean):
     return data - mean
 
-def calculate_covariances_1shot(data):
+def calculate_covariances_1shot_mixed_precision(data):
     mean = calculate_mean(data)
     centered_data = subtract_mean(data, mean)
     cov_matrix = torch.mm(centered_data.T, centered_data) / (data.size(0) - 1)
@@ -26,7 +26,7 @@ def test_incremental_covariance(data):
     num_updates = data.size(0) - data.size(1)
     order = data.size(1)
     print("initial full matrix calculation (1-shot):")
-    cov_matrix_1shot, mean = calculate_covariances_1shot(data[:order])
+    cov_matrix_1shot, mean = calculate_covariances_1shot_mixed_precision(data[:order])
     print(f"initial Mean: {mean}")
     print(f"initial covariance matrix:\n{cov_matrix_1shot}\n")
 
@@ -37,7 +37,7 @@ def test_incremental_covariance(data):
         print(f"updated Mean: {mean}")
         print(f"updated covariance matrix:\n{cov_matrix_1shot}\n")
         # 1-shot covariance matrix to ensure incremental update was correct
-        cov_matrix_1shot_check, _ = calculate_covariances_1shot(data[:order + i + 1])
+        cov_matrix_1shot_check, _ = calculate_covariances_1shot_mixed_precision(data[:order + i + 1])
         print(f"1-shot covariance matrix as check for update {i+1}:\n{cov_matrix_1shot_check}\n")
 
 def main():
