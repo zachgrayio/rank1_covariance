@@ -18,10 +18,11 @@ over a traditional matmul based approach.
 
 ## Results on my RTX 3080 16Gi
 ```text
-total time for rank1 update: 27.9831 seconds
-total time for 1shot update: 51.9181 seconds
-iterations per second for rank1 update: 90.0543 iterations/second
-iterations per second for 1shot update: 48.5380 iterations/second
+...
+total time for rank1 update: 20.7382 seconds
+total time for 1shot update: 35.2118 seconds
+iterations per second for rank1 update: 121.5150 iterations/second
+iterations per second for 1shot update: 71.5669 iterations/second
 ```
 
 ## Run it yourself
