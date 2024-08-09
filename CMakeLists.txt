@@ -6,7 +6,7 @@ set(CMAKE_CUDA_STANDARD 23)
 
 project(rank1_covariance CUDA)
 
-add_executable(rank1_covariance main.cu)
+add_executable(rank1_covariance kernels.hpp kernels.cu main.cu )
 
 set_target_properties(rank1_covariance PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
