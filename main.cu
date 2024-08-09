@@ -30,20 +30,36 @@ void print_matrix(const float* matrix, int rows, int cols) {
 }
 
 __global__ void calculate_mean(const float* d_data, float* d_mean, int rows, int cols) {
+    extern __shared__ float s_sum[];
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (col >= cols) return;
-
-    float sum = 0.0f;
-    for (int i = 0; i < rows; ++i) {
-        sum = fmaf(d_data[i * cols + col], 1.0f, sum);  // Fused multiply-add
+    if (col < cols) {
+        s_sum[threadIdx.x] = 0.0f;
+        for (int i = threadIdx.y; i < rows; i += blockDim.y) {
+            s_sum[threadIdx.x] += d_data[i * cols + col];
+        }
+        __syncthreads();
+        if (threadIdx.y == 0) {
+            float sum = 0.0f;
+            for (int i = 0; i < blockDim.y; ++i) {
+                sum += s_sum[threadIdx.x + i * blockDim.x];
+            }
+            d_mean[col] = sum / rows;
+        }
     }
-    d_mean[col] = sum / rows;
 }
 
 __global__ void subtract_mean(const float* d_data, const float* d_mean, float* d_centered_data, int rows, int cols) {
-    if (const int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < rows * cols) {
-        const int col = idx % cols;
-        d_centered_data[idx] = d_data[idx] - d_mean[col];
+    extern __shared__ float s_mean[];
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int col = idx % cols;
+
+    if (threadIdx.x < cols) {
+        s_mean[threadIdx.x] = d_mean[threadIdx.x];
+    }
+    __syncthreads();
+
+    if (idx < rows * cols) {
+        d_centered_data[idx] = d_data[idx] - s_mean[col];
     }
 }
 
@@ -53,10 +69,12 @@ void calculate_covariances_1shot(const float* d_data, float* d_cov_matrix, float
 
     int threads = 256;
     int blocks = (rows * cols + threads - 1) / threads;
-    calculate_mean<<<blocks, threads>>>(d_data, d_mean, rows, cols);
+    size_t sharedMemSize = threads * sizeof(float);
+
+    calculate_mean<<<blocks, threads, sharedMemSize>>>(d_data, d_mean, rows, cols);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    subtract_mean<<<blocks, threads>>>(d_data, d_mean, d_centered_data, rows, cols);
+    subtract_mean<<<blocks, threads, sharedMemSize>>>(d_data, d_mean, d_centered_data, rows, cols);
     checkCudaErrors(cudaDeviceSynchronize());
 
     cublasHandle_t handle;
@@ -79,20 +97,26 @@ void calculate_covariances_1shot(const float* d_data, float* d_cov_matrix, float
 }
 
 __global__ void rank1_update_kernel(float* d_cov_matrix, const float* d_new_row, float* d_mean, int cols, int n) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= cols) return;
+    extern __shared__ float s_mean[];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    const float new_mean = fmaf(d_new_row[idx] - d_mean[idx], 1.0f / n, d_mean[idx]);
-
-    // update the covariance matrix
-    const int row_start = idx * cols;
-    for (int j = 0; j < cols; ++j) {
-        const float delta_old = d_new_row[j] - d_mean[j];
-        const float delta_new = d_new_row[j] - new_mean;
-        d_cov_matrix[row_start + j] = fmaf(delta_old, delta_new / (n - 1), (n - 2) / static_cast<float>(n - 1) * d_cov_matrix[row_start + j]);
+    if (idx < cols) {
+        s_mean[threadIdx.x] = d_mean[idx];
     }
+    __syncthreads();
 
-    d_mean[idx] = new_mean;
+    if (idx < cols) {
+        float new_mean = fmaf(d_new_row[idx] - s_mean[threadIdx.x], 1.0f / n, s_mean[threadIdx.x]);
+
+        int row_start = idx * cols;
+        for (int j = 0; j < cols; ++j) {
+            float delta_old = d_new_row[j] - s_mean[j];
+            float delta_new = d_new_row[j] - new_mean;
+            d_cov_matrix[row_start + j] = fmaf(delta_old, delta_new / (n - 1), (n - 2) / float(n - 1) * d_cov_matrix[row_start + j]);
+        }
+
+        d_mean[idx] = new_mean;
+    }
 }
 
 __global__ void rank1_update_kernel_threaded(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
@@ -116,8 +140,9 @@ __global__ void rank1_update_kernel_threaded(float* d_cov_matrix, const float* d
 void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
     int threads = cols;
     int blocks = 1;
+    size_t sharedMemSize = threads * sizeof(float);
 
-    rank1_update_kernel<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
+    rank1_update_kernel<<<blocks, threads, sharedMemSize>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
     checkCudaErrors(cudaDeviceSynchronize());
 }
 
