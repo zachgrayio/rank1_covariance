@@ -370,9 +370,9 @@ void test_large_incremental_covariance(const int order, const int num_updates) {
 
     for (int i = 0; i < num_updates; ++i) {
         calculate_covariances_rank1(d_cov_matrix, d_data + (order + i) * cols, d_mean, cols, order + i + 1);
-        checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
 
         if (i % 100 == 0) {
+            checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
 #ifdef VERBOSE
             std::cout << "verifying update " << i + 1 << std::endl;
 #endif
