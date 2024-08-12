@@ -10,6 +10,7 @@
 
 #define VERBOSE
 constexpr bool ALWAYS_COPY_RESULT_TO_HOST = true;
+constexpr float ONESHOT_WORK_FACTOR = 0.5;
 
 inline void checkCudaErrors(const cudaError_t err) {
     if (err != cudaSuccess) {
@@ -420,9 +421,10 @@ std::chrono::duration<double> perform_timed_update(
         calculate_covariances_rank1(d_cov_matrix, d_data + (n-1) * cols, d_mean, cols, n);
     } else {
         // important note: for some domains, the 1shot method, since it can be called for a subset of data, is likely
-        // to make use of a subset of columns--a luxury the incremental approach doesn't have, so here we use cols/2
-        // as a reasonable estimate of the reduced work this function would do for a more fair and realistic benchmark
-        calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, n, cols/2);
+        // to make use of a subset of columns--a luxury the incremental approach doesn't have, so here we use cols
+        // * ONESHOT_WORK_FACTOR to estimate the reduced work this function may do in real-world applications.
+        const int reduced_cols = cols * ONESHOT_WORK_FACTOR;
+        calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, n, reduced_cols);
     }
     // copy back to host so this is somewhat realistic
     if(copy_d_to_h) {
