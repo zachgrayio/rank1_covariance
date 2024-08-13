@@ -8,7 +8,7 @@ over a traditional matmul based approach.
 
 - A Python reference implementation: [main.py](main.py)
   - PyTorch + CUDA if available
-  - also uses `numpy`'s `.cov()` for a simple sanity check:
+  - also uses `numpy`'s `.cov()` for a simple sanity check
 - A CUDA C++ binary [main.cu](main.cu)
   - includes a custom rank1 kernel
   - also a "1shot" covariance function that does roughly the same as `.cov` AFAIK
@@ -17,13 +17,18 @@ over a traditional matmul based approach.
   - a comparison function that compares timing of the 2 approaches
 
 ## Results on my RTX 3080 16Gi
+
+With the 1shot work factor set to 1:
+
 ```text
 ...
-total time for rank1 update: 20.0093 seconds
-total time for 1shot update: 28.7502 seconds
-iterations per second for rank1 update: 125.9415 iterations/second
-iterations per second for 1shot update: 87.6515 iterations/second
+total time for rank1 update: 21.4057 seconds
+total time for 1shot update: 83.4697 seconds
+iterations per second for rank1 update: 117.7259 iterations/second
+iterations per second for 1shot update: 30.1906 iterations/second
 ```
+
+But note that for some domains, the work factor for this function may be lower (closer to `0.5`), but this is domain and application specific.
 
 ## Run it yourself
 

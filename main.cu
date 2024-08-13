@@ -11,7 +11,7 @@
 
 #define VERBOSE
 constexpr bool ALWAYS_COPY_RESULT_TO_HOST = true;
-constexpr float ONESHOT_WORK_FACTOR = 0.5;
+constexpr float ONESHOT_WORK_FACTOR = 1;
 
 inline void checkCudaErrors(const cudaError_t err) {
     if (err != cudaSuccess) {
