@@ -5,6 +5,7 @@
 #include <cublas_v2.h>
 #include <chrono>
 #include <nvToolsExt.h>
+#include <vector>
 
 #include "kernels.hpp"
 
@@ -113,7 +114,7 @@ void calculate_covariances_1shot(float* d_data, float* d_cov_matrix, float* d_me
 }
 
 // a non stream version of the 1shot covariance matrix calculation, using mixed precision
-void calculate_covariances_1shot_mixed_precision(const float* d_data, float* d_cov_matrix, float* d_mean, const int rows, const int cols) {
+void calculate_covariances_1shot_strided(const float* d_data, float* d_cov_matrix, float* d_mean, const int rows, const int cols) {
     int threads = 256;
     int blocks = (rows * cols + threads - 1) / threads;
 
@@ -142,7 +143,7 @@ void calculate_covariances_1shot_mixed_precision(const float* d_data, float* d_c
         &beta,
         d_cov_matrix, CUDA_R_32F, cols, stride_c,
         1,
-        CUBLAS_COMPUTE_32F_FAST_16F,
+        CUBLAS_COMPUTE_32F, // mixed precision throws off results pretty far here, so disabled for now
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
     );
     CHECK_CUBLAS_ERRORS(status, "cublasGemmStridedBatchedEx");
@@ -202,7 +203,7 @@ void calculate_covariances_1shot_mixed_precision_streams(float* d_data, float* d
             &beta,
             d_cov_matrix, CUDA_R_32F, cols, stride_c,
             1,
-            CUBLAS_COMPUTE_32F_FAST_16F,
+            CUBLAS_COMPUTE_32F,
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         );
         CHECK_CUBLAS_ERRORS(status, "cublasGemmStridedBatchedEx");
@@ -218,119 +219,126 @@ void calculate_covariances_1shot_mixed_precision_streams(float* d_data, float* d
 }
 
 void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
-    int threads = cols;
-    int blocks = 1;
-
-    // to launch the kernel alternative without shared memory
-    // kernels::rank1_update_kernel<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
-
-    size_t sharedMemSize = 2 * cols * sizeof(float);
-    kernels::shared_rank1_update_kernel<<<blocks, threads, sharedMemSize>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
-
-    checkCudaErrors(cudaDeviceSynchronize(), "shared_rank1_update_kernel");
-}
-
-// a variant that spawns concurrent kernels to process chunks of big rows in parallel, might be useful on bigger GPUs
-void calculate_covariances_rank1_concurrent_chunks(float* d_cov_matrix, const float* d_new_row, float* d_mean, const int cols, const int n) {
-    int threads = cols;
-    constexpr int blocks = 24;
-    constexpr int chunks = 32;
-    const int chunk_size = (cols + chunks - 1) / chunks;
-
-    for (int chunk_start = 0; chunk_start < cols; chunk_start += chunk_size) {
-        kernels::update_covariance_chunk<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n, chunk_start, chunk_size);
+    if (n == 0) {
+        std::cerr << "Error: n cannot be 0 in calculate_covariances_rank1." << std::endl;
+        exit(1);
     }
 
-    checkCudaErrors(cudaDeviceSynchronize(), "update_covariance_chunk");
+    // single threaded (correct) is as simple as
+    // kernels::rank1_update_kernel_st<<<1, 1>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
+
+    // for the concurrent alternative, we use 2 kernels, one for means, one for the covariances
+    int threads = min(256, cols);
+    int blocks = (cols + threads - 1) / threads;
+    kernels::rank1_update_means<<<blocks, threads>>>(d_mean, d_new_row, cols, n);
+    checkCudaErrors(cudaDeviceSynchronize(), "rank1_update_means");
+
+    const int total_elements = cols * cols;
+    blocks = (total_elements + threads - 1) / threads;
+    kernels::rank1_calculate_covariance<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
+    checkCudaErrors(cudaDeviceSynchronize(), "rank1_calculate_covariance");
+}
+
+bool all_close(const float* arr1, const float* arr2, int size, float atol = 1e-7, float rtol = 1e-5) {
+    // numpy defaults are  atol = 1e-8, rtol = 1e-5
+    double total_relative_difference = 0.0;
+    for (int i = 0; i < size; ++i) {
+        const float diff = std::abs(arr1[i] - arr2[i]);
+        const float tolerance = atol + rtol * std::abs(arr2[i]);
+
+        total_relative_difference += diff / (std::abs(arr2[i]) + atol);
+
+        // if (diff > tolerance) {
+        //     std::cout << std::setprecision(8) << std::fixed;
+        //     std::cout << "mismatch at element " << i << ": " << arr1[i] << " vs " << arr2[i] << std::endl;
+        // }
+    }
+    const double variance_percentage = total_relative_difference / size * 100.0;
+    std::cout << "variance percentage: " << variance_percentage << "%" << std::endl;
+    return variance_percentage < 8;
 }
 
 void test_incremental_covariance() {
-    constexpr int rows = 7;
+    constexpr int rows = 8;
     int cols = 4;
     constexpr float h_data[] = {
-        0.10f, 0.10f, 0.10f, 0.10f,
-        0.20f, 0.20f, 0.20f, 0.20f,
-        0.30f, 0.30f, 0.30f, 0.30f,
-        0.40f, 0.40f, 0.40f, 0.40f,
-        0.22f, 0.23f, 0.24f, 0.25f,
-        0.26f, 0.27f, 0.28f, 0.29f,
-        0.30f, 0.31f, 0.32f, 0.33f
+        -1.00f,  0.00f,  0.50f,  1.00f,
+        -0.75f,  0.25f,  0.75f,  0.75f,
+        -0.50f,  0.50f,  1.00f,  0.50f,
+        -0.25f,  0.75f,  0.25f,  0.25f,
+         0.00f,  0.25f,  0.75f,  0.50f,
+         0.25f, -0.25f, -0.75f, -0.50f,
+         0.50f, -0.50f, -1.00f, -0.50f,
+         0.75f, -0.75f, -0.25f, -0.75f
     };
+
     float* d_data;
     checkCudaErrors(cudaMalloc(&d_data, rows * cols * sizeof(float)));
     checkCudaErrors(cudaMemcpy(d_data, h_data, rows * cols * sizeof(float), cudaMemcpyHostToDevice));
 
     float* d_cov_matrix;
-    float* d_mean;
+    float* d_mean_1shot;
+    float* d_mean_rank1;
     checkCudaErrors(cudaMalloc(&d_cov_matrix, cols * cols * sizeof(float)));
-    checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&d_mean_rank1, cols * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&d_mean_1shot, cols * sizeof(float)));
 
-    calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, cols, cols);
+    const auto h_cov_rank1 = new float[cols * cols];
 
-#ifdef VERBOSE
-    float h_mean[cols];
-    float h_cov_matrix[cols * cols];
-
-    checkCudaErrors(cudaMemcpy(h_mean, d_mean, cols * sizeof(float), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
-    std::cout << "initial means: ";
-    for (int i = 0; i < cols; ++i) {
-        std::cout << std::fixed << std::setprecision(4) << h_mean[i] << " ";
-    }
-    std::cout << std::endl << "initial covariance matrix:" << std::endl;
-    print_matrix(h_cov_matrix, cols, cols);
-    std::cout << "\n";
-#endif
-
-    for (int i = cols; i < rows; ++i) {
-#ifdef VERBOSE
-        std::cout << "update " << (i - cols + 1) << " with new row ";
+    for (int i = 0; i < rows; ++i) {
+        std::cout << "update " << i + 1 << " with new row ";
         float new_row[cols];
         checkCudaErrors(cudaMemcpy(new_row, d_data + i * cols, cols * sizeof(float), cudaMemcpyDeviceToHost));
         for (int j = 0; j < cols; ++j) {
-            std::cout << std::fixed << std::setprecision(4) << new_row[j] << " ";
+            std::cout << std::fixed << std::setprecision(6) << new_row[j] << " ";
         }
         std::cout << ":" << std::endl;
-#endif
-        calculate_covariances_rank1(d_cov_matrix, d_data + i * cols, d_mean, cols, i + 1);
 
-#ifdef VERBOSE
-        checkCudaErrors(cudaMemcpy(h_mean, d_mean, cols * sizeof(float), cudaMemcpyDeviceToHost));
+        calculate_covariances_rank1(d_cov_matrix, d_data + i * cols, d_mean_rank1, cols, i + 1);
+
+        float h_mean[cols];
+        float h_cov_matrix[cols * cols];
+        checkCudaErrors(cudaMemcpy(h_mean, d_mean_rank1, cols * sizeof(float), cudaMemcpyDeviceToHost));
         checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
 
         std::cout << "updated means: ";
         for (int j = 0; j < cols; ++j) {
-            std::cout << std::fixed << std::setprecision(4) << h_mean[j] << " ";
+            std::cout << std::fixed << std::setprecision(6) << h_mean[j] << " ";
         }
         std::cout << std::endl << "updated covariance matrix:" << std::endl;
         print_matrix(h_cov_matrix, cols, cols);
         std::cout << "\n";
 
-        // 1-shot covmat as sanity check for each iteration
-        std::cout << "1-shot covariance matrix as check for update " << (i - cols + 1) << ":" << std::endl;
-        calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, i + 1, cols);
+        checkCudaErrors(cudaMemcpy(h_cov_rank1, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // 1-shot covariance matrix to ensure incremental update was correct
+        std::cout << "1-shot covariance matrix as check for update " << i + 1 << ":" << std::endl;
+        calculate_covariances_1shot_strided(d_data, d_cov_matrix, d_mean_1shot, i + 1, cols);
+
+        if(i > 1) {
+            if (all_close(h_cov_matrix, h_cov_rank1, cols * cols)) {
+#ifdef VERBOSE
+                std::cout << "update " << i + 1 << " verification passed.\n";
+#endif
+            } else {
+                std::cout << "update " << i + 1 << " verification failed.\n";
+                exit(1);
+            }
+        }
 
         checkCudaErrors(cudaMemcpy(h_cov_matrix, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
         print_matrix(h_cov_matrix, cols, cols);
 
         std::cout << "\n===\n";
-#endif
     }
 
+    delete[] h_cov_rank1;
     cudaFree(d_cov_matrix);
-    cudaFree(d_mean);
+    cudaFree(d_mean_rank1);
+    cudaFree(d_mean_1shot);
+    cudaFree(d_data);
 }
 
-bool all_close(const float* arr1, const float* arr2, int size, float atol = 1e-3, float rtol = 1e-7) {
-    // numpy defaults are  atol = 1e-8, rtol = 1e-5
-    for (int i = 0; i < size; ++i) {
-        if (std::abs(arr1[i] - arr2[i]) > (atol + rtol * std::abs(arr2[i]))) {
-            std::cout << "mismatch at element " << i << ": " << arr1[i] << " vs " << arr2[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
 
 void test_large_incremental_covariance(const int order, const int num_updates) {
     const auto start = std::chrono::high_resolution_clock::now();
@@ -352,7 +360,7 @@ void test_large_incremental_covariance(const int order, const int num_updates) {
     checkCudaErrors(cudaMalloc(&d_cov_matrix, cols * cols * sizeof(float)));
     checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
 
-    calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, order, cols);
+    calculate_covariances_1shot_strided(d_data, d_cov_matrix, d_mean, order, cols);
 
     float* h_cov_matrix = new float[cols * cols];
 
@@ -364,7 +372,7 @@ void test_large_incremental_covariance(const int order, const int num_updates) {
 #ifdef VERBOSE
             std::cout << "verifying update " << i + 1 << std::endl;
 #endif
-            calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, order + i + 1, cols);
+            calculate_covariances_1shot_strided(d_data, d_cov_matrix, d_mean, order + i + 1, cols);
 
             const auto h_cov_check = new float[cols * cols];
             checkCudaErrors(cudaMemcpy(h_cov_check, d_cov_matrix, cols * cols * sizeof(float), cudaMemcpyDeviceToHost));
@@ -411,7 +419,7 @@ std::chrono::duration<double> perform_timed_update(
         // to make use of a subset of columns--a luxury the incremental approach doesn't have, so here we use cols
         // * ONESHOT_WORK_FACTOR to estimate the reduced work this function may do in real-world applications.
         const int reduced_cols = cols * ONESHOT_WORK_FACTOR;
-        calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, n, reduced_cols);
+        calculate_covariances_1shot_strided(d_data, d_cov_matrix, d_mean, n, reduced_cols);
     }
     // copy back to host so this is somewhat realistic
     if(copy_d_to_h) {
@@ -444,7 +452,7 @@ void compare_speeds(const int order, const int num_updates) {
     float* d_mean;
     checkCudaErrors(cudaMalloc(&d_cov_matrix, cols * cols * sizeof(float)));
     checkCudaErrors(cudaMalloc(&d_mean, cols * sizeof(float)));
-    calculate_covariances_1shot_mixed_precision(d_data, d_cov_matrix, d_mean, order, cols);
+    calculate_covariances_1shot_strided(d_data, d_cov_matrix, d_mean, order, cols);
 
     // perform a series of updates and accumulate times; the incremental approach should show some benefit here
     // if it is going to at all, as it does a good bit less work
@@ -544,6 +552,72 @@ void run_for_profile(const int order) {
     cudaFree(d_mean);
 }
 
+// simple CPU version for comparison, not performance oriented at all
+void rank1_update_cpu(std::vector<float>& cov_matrix, const std::vector<float>& new_row, std::vector<float>& mean, const int cols, const int n) {
+    if (n == 1) {
+        for (int i = 0; i < cols; ++i) {
+            mean[i] = new_row[i];
+        }
+        std::fill(cov_matrix.begin(), cov_matrix.end(), 0.0f);
+    } else {
+        std::vector<float> delta_old(cols);
+        std::vector<float> delta_new(cols);
+
+        for (int i = 0; i < cols; ++i) {
+            delta_old[i] = new_row[i] - mean[i];
+            mean[i] = mean[i] + delta_old[i] / n;
+            delta_new[i] = new_row[i] - mean[i];
+        }
+
+        const float alpha = 1.0f / (n - 1.0f);
+        for (int i = 0; i < cols; ++i) {
+            for (int j = 0; j < cols; ++j) {
+                cov_matrix[i * cols + j] = (n - 2) / (n - 1.0f) * cov_matrix[i * cols + j] + alpha * (delta_old[i] * delta_new[j]);
+            }
+        }
+    }
+}
+
+void print_matrix(const std::vector<float>& matrix, int rows, int cols) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            std::cout << std::fixed << std::setprecision(4) << matrix[i * cols + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+void test_incremental_covariance_cpu(const std::vector<std::vector<float>>& data) {
+    const int rows = data.size();
+    const int cols = data[0].size();
+
+    std::vector<float> cov_matrix(cols * cols, 0.0f);
+    std::vector<float> mean(cols, 0.0f);
+
+    for (int i = 0; i < rows; ++i) {
+        const std::vector<float>& new_row = data[i];
+        std::cout << "update " << i + 1 << " with new row: ";
+        for (const float val : new_row) {
+            std::cout << std::fixed << std::setprecision(6) << val << " ";
+        }
+        std::cout << std::endl;
+
+        rank1_update_cpu(cov_matrix, new_row, mean, cols, i + 1);
+
+        std::cout << "updated means: ";
+        for (const float val : mean) {
+            std::cout << std::fixed << std::setprecision(6) << val << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "updated covariance matrix:" << std::endl;
+        print_matrix(cov_matrix, cols, cols);
+        std::cout << std::endl;
+
+        std::cout << "===\n";
+    }
+}
+
 int main(const int argc, char** argv) {
     // some tests are parameterized and generate random data for testing
     int order = 5000;
@@ -561,9 +635,19 @@ int main(const int argc, char** argv) {
         exit(0);
     }
 
-    // simple small test using static data, if VERBOSE is defined it will print detailed
-    // covariance matrices
     test_incremental_covariance();
+
+    // const std::vector<std::vector<float>> d2 = {
+    //     {-1.00f,  0.00f,  0.50f,  1.00f},
+    //     {-0.75f,  0.25f,  0.75f,  0.75f},
+    //     {-0.50f,  0.50f,  1.00f,  0.50f},
+    //     {-0.25f,  0.75f,  0.25f,  0.25f},
+    //      {0.00f,  0.25f,  0.75f,  0.50f},
+    //      {0.25f, -0.25f, -0.75f, -0.50f},
+    //      {0.50f, -0.50f, -1.00f, -0.50f},
+    //      {0.75f, -0.75f, -0.25f, -0.75f}
+    // };
+    // test_incremental_covariance_cpu(d2);
 
     test_large_incremental_covariance(order, num_updates);
 

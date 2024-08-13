@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 
 def calculate_mean(data):
     return torch.mean(data, dim=0)
@@ -13,53 +13,63 @@ def calculate_covariances_1shot_mixed_precision(data):
     cov_matrix = torch.mm(centered_data.T, centered_data) / (data.size(0) - 1)
     return cov_matrix, mean
 
+
 def rank1_update(cov_matrix, new_row, mean, n):
-    # calculate the new mean
-    new_mean = mean + (new_row - mean) / n
-    # update the covariance matrix
-    delta_old = new_row - mean
-    delta_new = new_row - new_mean
-    cov_matrix = ((n - 2) / (n - 1)) * cov_matrix + torch.outer(delta_old, delta_new) / (n - 1)
+    if n == 1:
+        new_mean = new_row
+        cov_matrix = torch.zeros_like(cov_matrix)
+    else:
+        new_mean = mean + (new_row - mean) / n
+        delta_old = new_row - mean
+        delta_new = new_row - new_mean
+        cov_matrix = ((n - 2) / (n - 1)) * cov_matrix + torch.outer(delta_old, delta_new) / (n - 1)
     return cov_matrix, new_mean
 
-def test_incremental_covariance(data):
-    num_updates = data.size(0) - data.size(1)
-    order = data.size(1)
-    print("initial full matrix calculation (1-shot):")
-    cov_matrix_1shot, mean = calculate_covariances_1shot_mixed_precision(data[:order])
-    print(f"initial Mean: {mean}")
-    print(f"initial covariance matrix:\n{cov_matrix_1shot}\n")
 
-    for i in range(num_updates):
-        new_row = data[order + i]
-        print(f"update {i+1} with new row {new_row}:")
-        cov_matrix_1shot, mean = rank1_update(cov_matrix_1shot, new_row, mean, order + i + 1)
-        print(f"updated Mean: {mean}")
-        print(f"updated covariance matrix:\n{cov_matrix_1shot}\n")
+def test_incremental_covariance(data):
+    order = data.size(1)
+    cov_matrix_rank1 = torch.zeros((order, order), device=data.device)
+    mean_rank1 = torch.zeros(order, device=data.device)
+
+    for i in range(data.size(0)):
+        new_row = data[i]
+        print(f"update {i+1} with new row {new_row.cpu().numpy()}:")
+
+        cov_matrix_rank1, mean_rank1 = rank1_update(cov_matrix_rank1, new_row, mean_rank1, i + 1)
+
+        print(f"updated means: {mean_rank1.cpu().numpy()}")
+        print(f"updated covariance matrix:\n{cov_matrix_rank1.cpu().numpy()}\n")
+
         # 1-shot covariance matrix to ensure incremental update was correct
-        cov_matrix_1shot_check, _ = calculate_covariances_1shot_mixed_precision(data[:order + i + 1])
-        print(f"1-shot covariance matrix as check for update {i+1}:\n{cov_matrix_1shot_check}\n")
+        cov_matrix_1shot_check, _ = calculate_covariances_1shot_mixed_precision(data[:i + 1])
+        print(f"1-shot covariance matrix as check for update {i+1}:\n{cov_matrix_1shot_check.cpu().numpy()}\n")
+
 
 def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     # sanity check with np
     data = np.array([
-        [0.10, 0.10, 0.10, 0.10],
-        [0.20, 0.20, 0.20, 0.20],
-        [0.30, 0.30, 0.30, 0.30],
-        [0.40, 0.40, 0.40, 0.40]
+        [-1.00,  0.00,  0.50,  1.00],
+        [-0.75,  0.25,  0.75,  0.75],
+        [-0.50,  0.50,  1.00,  0.50],
+        [-0.25,  0.75,  0.25,  0.25],
     ])
     cov_matrix = np.cov(data, rowvar=False)
     print("numpy covariance matrix:\n", cov_matrix)
+    cov_matrix_1shot_check, _ = calculate_covariances_1shot_mixed_precision(torch.tensor(data, device=device))
+    print("1shot covariance matrix:\n", cov_matrix_1shot_check)
+
     # torch
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data = torch.tensor([
-        [0.10, 0.10, 0.10, 0.10],
-        [0.20, 0.20, 0.20, 0.20],
-        [0.30, 0.30, 0.30, 0.30],
-        [0.40, 0.40, 0.40, 0.40],
-        [0.22, 0.23, 0.24, 0.25],
-        [0.26, 0.27, 0.28, 0.29],
-        [0.30, 0.31, 0.32, 0.33]
+        [-1.00,  0.00,  0.50,  1.00],
+        [-0.75,  0.25,  0.75,  0.75],
+        [-0.50,  0.50,  1.00,  0.50],
+        [-0.25,  0.75,  0.25,  0.25],
+        [0.00,  0.25,  0.75,  0.50],
+        [0.25, -0.25, -0.75, -0.50],
+        [0.50, -0.50, -1.00, -0.50],
+        [0.75, -0.75, -0.25, -0.75]
     ], device=device)
     test_incremental_covariance(data)
 
