@@ -91,19 +91,6 @@ void calculate_covariances_1shot(float* d_data, float* d_cov_matrix, float* d_me
     kernels::subtract_means<<<blocks, threads>>>(d_data, d_mean, d_centered, rows, cols);
     checkCudaErrors(cudaDeviceSynchronize(), "subtract_means_inplace");
 
-    // this variant combines these ops to a single kernel but this is slower so far in my testing, the kernel
-    // needs profiled.
-    //
-    // kernels::update_and_subtract_means_inplace<<<blocks, threads>>>(d_data, d_mean, rows, cols);
-    // checkCudaErrors(cudaDeviceSynchronize(), "update_and_subtract_means_inplace");
-
-    // another variant of centering using shared memory, but so far its only slower, again it needs profiled and launch
-    // params tuned.
-    //
-    // size_t sharedMemSize = threads * sizeof(float);
-    // kernels::shared_update_and_subtract_means_inplace<<<blocks, threads, sharedMemSize>>>(d_data, d_mean, rows, cols);
-    // checkCudaErrors(cudaDeviceSynchronize(), "shared_update_and_subtract_means_inplace");
-
     cublasHandle_t handle;
     cublasCreate(&handle);
     // the alpha here is how we apply the "over n - 1" part of the formula directly in the GEMM
@@ -235,7 +222,7 @@ void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, fl
     int blocks = 1;
 
     // to launch the kernel alternative without shared memory
-    // rank1_update_kernel<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
+    // kernels::rank1_update_kernel<<<blocks, threads>>>(d_cov_matrix, d_new_row, d_mean, cols, n);
 
     size_t sharedMemSize = 2 * cols * sizeof(float);
     kernels::shared_rank1_update_kernel<<<blocks, threads, sharedMemSize>>>(d_cov_matrix, d_new_row, d_mean, cols, n);

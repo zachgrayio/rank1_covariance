@@ -29,17 +29,15 @@ namespace kernels {
         extern __shared__ float s_mem[];
         float* s_mean = s_mem;
         float* s_new_row = s_mem + cols;
-        const int idx = threadIdx.x;
 
-        if (idx < cols) {
+        if (const int idx = threadIdx.x; idx < cols) {
             s_mean[idx] = d_mean[idx];
             s_new_row[idx] = d_new_row[idx];
-        }
-        __syncthreads();
+            __syncthreads();
 
-        if (idx < cols) {
             const float new_mean = fmaf(s_new_row[idx] - s_mean[idx], 1.0f / n, s_mean[idx]);
             const int row_start = idx * cols;
+
             for (int j = 0; j < cols; ++j) {
                 const float delta_old = s_new_row[j] - s_mean[j];
                 const float delta_new = s_new_row[j] - new_mean;
