@@ -72,7 +72,7 @@ namespace kernels {
     }
 
 
-    // a helper kernel to remove the pre-calculated means in-place as part of centering ahead of sgemm call in the 1
+    // a helper kernel to remove the pre-calculated means as part of centering ahead of sgemm call in the 1
     // shot covariance method
     __global__ void subtract_means(const float* d_data, const float* d_mean, float* d_centered, const int rows, const int cols) {
         if (const int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < rows * cols) {
