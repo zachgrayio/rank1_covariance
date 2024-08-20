@@ -240,22 +240,35 @@ void calculate_covariances_rank1(float* d_cov_matrix, const float* d_new_row, fl
 }
 
 bool all_close(const float* arr1, const float* arr2, int size, float atol = 1e-7, float rtol = 1e-5) {
-    // numpy defaults are  atol = 1e-8, rtol = 1e-5
     double total_relative_difference = 0.0;
+    int divergence_count = 0;
+
     for (int i = 0; i < size; ++i) {
         const float diff = std::abs(arr1[i] - arr2[i]);
         const float tolerance = atol + rtol * std::abs(arr2[i]);
 
         total_relative_difference += diff / (std::abs(arr2[i]) + atol);
 
-        // if (diff > tolerance) {
-        //     std::cout << std::setprecision(8) << std::fixed;
-        //     std::cout << "mismatch at element " << i << ": " << arr1[i] << " vs " << arr2[i] << std::endl;
-        // }
+        if (diff > tolerance) {
+            divergence_count++;
+            // to print mismatches; very spammy
+            // std::cout << std::setprecision(8) << std::fixed;
+            // std::cout << "mismatch at element " << i << ": " << arr1[i] << " vs " << arr2[i] << std::endl;
+
+            // and to match numpy behavior, return false here
+        }
     }
-    const double variance_percentage = total_relative_difference / size * 100.0;
-    std::cout << "variance percentage: " << variance_percentage << "%" << std::endl;
-    return variance_percentage < 8;
+
+    // to match numpy behavior, just return true here
+
+    // but instead, we'll allow some divergence
+    const double divergence_percentage_elements = static_cast<double>(divergence_count) / size * 100.0;
+    std::cout << "divergence percentage (elements): " << divergence_percentage_elements << "%" << std::endl;
+
+    const double divergence_percentage = total_relative_difference / size * 100.0;
+    std::cout << "divergence percentage: " << divergence_percentage << "%" << std::endl;
+
+    return divergence_percentage_elements < 1 && divergence_percentage < 1;
 }
 
 void test_incremental_covariance() {
